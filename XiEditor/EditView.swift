@@ -302,6 +302,7 @@ class EditView: NSView, NSTextInputClient {
         } else if let str = aString as? NSString {
             dataSource.document.sendRpcAsync("insert", params: insertedStringToJson(str))
         }
+        // TODO: update selected range here
         return NSMakeRange(replacementRange.location, len)
     }
 
