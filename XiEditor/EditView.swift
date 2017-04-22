@@ -105,7 +105,6 @@ class EditView: NSView, NSTextInputClient {
     var timer: Timer?
     var timerEvent: NSEvent?
 
-    var cursorPos: (Int, Int)?
     fileprivate var _selectedRange: NSRange
     fileprivate var _markedRange: NSRange
     
@@ -177,21 +176,28 @@ class EditView: NSView, NSTextInputClient {
         }
 
         // first pass, for drawing background selections
+        _selectedRange = NSMakeRange(NSNotFound, 0)
+        var lineStartPos = 0 as Int
         for lineIx in first..<last {
-            guard let line = getLine(lineIx), line.containsSelection == true else { continue }
-            let selections = line.styles.filter { $0.style == 0 }
-            let attrString = NSMutableAttributedString(string: line.text, attributes: dataSource.textMetrics.attributes)
-            let ctline = CTLineCreateWithAttributedString(attrString)
-            let y = dataSource.textMetrics.linespace * CGFloat(lineIx + 1)
-            context.setFillColor(textSelectionColor.cgColor)
-            for selection in selections {
-                let selStart = CTLineGetOffsetForStringIndex(ctline, selection.range.location, nil)
-                let selEnd = CTLineGetOffsetForStringIndex(ctline, selection.range.location + selection.range.length, nil)
-                context.fill(CGRect.init(x: x0 + selStart, y: y - dataSource.textMetrics.ascent, width: selEnd - selStart, height: dataSource.textMetrics.linespace))
+            guard let line = getLine(lineIx) else { continue }
+            if (line.containsSelection == true) {
+                let selections = line.styles.filter { $0.style == 0 }
+                let attrString = NSMutableAttributedString(string: line.text, attributes: dataSource.textMetrics.attributes)
+                let ctline = CTLineCreateWithAttributedString(attrString)
+                let y = dataSource.textMetrics.linespace * CGFloat(lineIx + 1)
+                context.setFillColor(textSelectionColor.cgColor)
+                for selection in selections {
+                    let selStart = CTLineGetOffsetForStringIndex(ctline, selection.range.location, nil)
+                    let selEnd = CTLineGetOffsetForStringIndex(ctline, selection.range.location + selection.range.length, nil)
+                    context.fill(CGRect.init(x: x0 + selStart, y: y - dataSource.textMetrics.ascent, width: selEnd - selStart, height: dataSource.textMetrics.linespace))
+                    _selectedRange = NSMakeRange(lineStartPos + selection.range.location, selection.range.length)
+                }
             }
-            
+            let s = line.text
+            lineStartPos += s.characters.count
         }
         // second pass, for actually rendering text.
+        lineStartPos = 0
         for lineIx in first..<last {
             // TODO: could block for ~1ms waiting for missing lines to arrive
             guard let line = getLine(lineIx) else { continue }
@@ -203,24 +209,20 @@ class EditView: NSView, NSTextInputClient {
             */
             dataSource.styleMap.applyStyles(text: s, string: &attrString, styles: line.styles)
             for c in line.cursor {
-                let cix = utf8_offset_to_utf16(s, c)
                 // TODO: How should we handle the situations that have multi-cursor?
-                self.cursorPos = (lineIx, cix)
-                if (markedRange().location != NSNotFound) {
-                    let markRangeStart = cix - markedRange().length
-                    if (markRangeStart >= 0) {
-                        attrString.addAttribute(NSUnderlineStyleAttributeName,
-                                                value: NSUnderlineStyle.styleSingle.rawValue,
-                                                range: NSMakeRange(markRangeStart, markedRange().length))
-                    }
+                let cix = utf8_offset_to_utf16(s, c)
+                if (_selectedRange.location == NSNotFound) {
+                    _selectedRange = NSMakeRange(lineStartPos + cix, 0)
                 }
-                if (selectedRange().location != NSNotFound) {
-                    let selectedRangeStart = cix - markedRange().length + selectedRange().location
-                    if (selectedRangeStart >= 0) {
-                        attrString.addAttribute(NSUnderlineStyleAttributeName,
-                                                value: NSUnderlineStyle.styleThick.rawValue,
-                                                range: NSMakeRange(selectedRangeStart, selectedRange().length))
+                // Assume that the marked text is in the line same as the cursor.
+                if (_markedRange.location != NSNotFound) {
+                    if (_markedRange.location - lineStartPos + _markedRange.length > s.characters.count) {
+                        // TODO: although the insert marked text request is sent to backend and the marked range is updated in frontend, however, the text may not be added to backend. If we try to add attribute to those text not yet added to backend, the app will crash.
+                        continue
                     }
+                    attrString.addAttribute(NSUnderlineStyleAttributeName,
+                                                value: NSUnderlineStyle.styleSingle.rawValue,
+                                                range: NSMakeRange(_markedRange.location - lineStartPos, _markedRange.length))
                 }
             }
 
@@ -249,6 +251,7 @@ class EditView: NSView, NSTextInputClient {
                     context.strokePath()
                 }
             }
+            lineStartPos += s.characters.count
         }
     }
 
@@ -263,33 +266,22 @@ class EditView: NSView, NSTextInputClient {
     
     // MARK: - NSTextInputClient protocol
     func insertText(_ aString: Any, replacementRange: NSRange) {
-        self.removeMarkedText()
-        let _ = self.replaceCharactersInRange(replacementRange, withText: aString as AnyObject)
+        var rangeToBeReplace = replacementRange
+        if (replacementRange.location == NSNotFound) {
+            if (_markedRange.location != NSNotFound) {
+                rangeToBeReplace = _markedRange
+            } else {
+                rangeToBeReplace = _selectedRange;
+            }
+        }
+        let _ = self.replaceCharactersInRange(rangeToBeReplace, withText: aString as AnyObject)
+        self.unmarkText()
     }
-    
+
     public func characterIndex(for point: NSPoint) -> Int {
         return 0
     }
     
-    func replacementMarkedRange(_ replacementRange: NSRange) -> NSRange {
-        var markedRange = _markedRange
-
-
-        if (markedRange.location == NSNotFound) {
-            markedRange = _selectedRange
-        }
-        if (replacementRange.location != NSNotFound) {
-            var newRange: NSRange = markedRange
-            newRange.location += replacementRange.location
-            newRange.length += replacementRange.length
-            if (NSMaxRange(newRange) <= NSMaxRange(markedRange)) {
-                markedRange = newRange
-            }
-        }
-
-        return markedRange
-    }
-
     func replaceCharactersInRange(_ aRange: NSRange, withText aString: AnyObject) -> NSRange {
         var replacementRange = aRange
         var len = 0
@@ -314,15 +306,17 @@ class EditView: NSView, NSTextInputClient {
     }
 
     func setMarkedText(_ aString: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        var mutSelectedRange = selectedRange
-        let effectiveRange = self.replaceCharactersInRange(self.replacementMarkedRange(replacementRange), withText: aString as AnyObject)
-        if (selectedRange.location != NSNotFound) {
-            mutSelectedRange.location += effectiveRange.location
+        var rangeToBeReplace = replacementRange
+        if (replacementRange.location == NSNotFound) {
+            if (_markedRange.location != NSNotFound) {
+                rangeToBeReplace = _markedRange
+            } else {
+                rangeToBeReplace = _selectedRange;
+            }
         }
-        _selectedRange = mutSelectedRange
-        _markedRange = effectiveRange
-        if (effectiveRange.length == 0) {
-            self.removeMarkedText()
+        _markedRange = self.replaceCharactersInRange(rangeToBeReplace, withText: aString as AnyObject)
+        if (_markedRange.length == 0) {
+            unmarkText();
         }
     }
 
@@ -333,7 +327,6 @@ class EditView: NSView, NSTextInputClient {
             }
         }
         _markedRange = NSMakeRange(NSNotFound, 0)
-        _selectedRange = NSMakeRange(NSNotFound, 0)
     }
 
     func unmarkText() {
@@ -361,8 +354,9 @@ class EditView: NSView, NSTextInputClient {
     }
 
     func firstRect(forCharacterRange aRange: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        let lineIx = getLineOfPos(aRange.location)
+        let pos = aRange.location - getLineStartPos(lineIx)
         if let viewWinFrame = self.window?.convertToScreen(self.frame),
-            let (lineIx, pos) = self.cursorPos,
             let line = getLine(lineIx) {
             let str = line.text
             let ctLine = CTLineCreateWithAttributedString(NSMutableAttributedString(string: str, attributes: dataSource.textMetrics.attributes))
@@ -436,5 +430,42 @@ class EditView: NSView, NSTextInputClient {
 
     func getLine(_ lineNum: Int) -> Line? {
         return dataSource.lines.get(lineNum)
+    }
+
+    func getLineOfPos(_ pos: Int) -> Int {
+        var lineNum = 0 as Int
+        
+        var wordCount = 0 as Int
+        while true {
+            var line = getLine(lineNum)
+            if (line == nil) {
+                break
+            }
+            wordCount += (line?.text.characters.count)!
+            if (wordCount >= pos) {
+                break
+            }
+            lineNum += 1
+        }
+        
+        return lineNum
+    }
+
+    func getLineStartPos(_ lineNum: Int) -> Int {
+        var wordCount = 0 as Int
+        
+        if (lineNum == 0) {
+            return 0
+        }
+        
+        for lineIx in 0...lineNum-1 {
+            var line = getLine(lineIx)
+            if (line == nil) {
+                break
+            }
+            wordCount += (line?.text.characters.count)!
+        }
+        
+        return wordCount
     }
 }
