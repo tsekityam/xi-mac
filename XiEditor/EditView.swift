@@ -277,7 +277,11 @@ class EditView: NSView, NSTextInputClient {
     }
     
     public func characterIndex(for point: NSPoint) -> Int {
-        return 0
+        let screenRect = NSMakeRect(point.x, point.y, 0, 0)
+        let windowRect = self.window?.convertFromScreen(screenRect)
+        let windowPoint = NSMakePoint((windowRect?.origin.x)!, (windowRect?.origin.y)!)
+        let bufferPos = bufferPositionFromPoint(windowPoint)
+        return getLineStartPos(bufferPos.line) + bufferPos.column
     }
     
     func replaceCharactersInRange(_ aRange: NSRange, withText aString: AnyObject) -> NSRange {
